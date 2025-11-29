@@ -1,3 +1,5 @@
+[file name]: server.js
+[file content begin]
 const express = require('express');
 const http = require('http');
 const socketIo = require('socket.io');
@@ -5,6 +7,7 @@ const jwt = require('jsonwebtoken');
 const cors = require('cors');
 const path = require('path');
 const bcrypt = require('bcryptjs');
+const fs = require('fs');
 
 console.log('🚀 Starting Secure Messenger...');
 
@@ -23,11 +26,58 @@ app.use(cors());
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
-// 🔥 ПРОСТАЯ БАЗА ДАННЫХ В ПАМЯТИ (работает без MongoDB)
-let users = [];
-let friendRequests = [];
-let messages = [];
+// 🔥 ПЕРСИСТЕНТНАЯ БАЗА ДАННЫХ (сохраняется в файлы)
+const DATA_DIR = './data';
+const USERS_FILE = path.join(DATA_DIR, 'users.json');
+const FRIEND_REQUESTS_FILE = path.join(DATA_DIR, 'friend_requests.json');
+const MESSAGES_FILE = path.join(DATA_DIR, 'messages.json');
+
+// Создаем директорию для данных если не существует
+if (!fs.existsSync(DATA_DIR)) {
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+}
+
+// Функции для работы с данными
+function loadData(file, defaultValue = []) {
+  try {
+    if (fs.existsSync(file)) {
+      const data = fs.readFileSync(file, 'utf8');
+      return JSON.parse(data);
+    }
+  } catch (error) {
+    console.error('❌ Ошибка загрузки данных:', error);
+  }
+  return defaultValue;
+}
+
+function saveData(file, data) {
+  try {
+    fs.writeFileSync(file, JSON.stringify(data, null, 2));
+    return true;
+  } catch (error) {
+    console.error('❌ Ошибка сохранения данных:', error);
+    return false;
+  }
+}
+
+// Загружаем данные при старте
+let users = loadData(USERS_FILE);
+let friendRequests = loadData(FRIEND_REQUESTS_FILE);
+let messages = loadData(MESSAGES_FILE);
 let onlineUsers = new Map();
+
+// Функции для сохранения данных
+function saveUsers() {
+  saveData(USERS_FILE, users);
+}
+
+function saveFriendRequests() {
+  saveData(FRIEND_REQUESTS_FILE, friendRequests);
+}
+
+function saveMessages() {
+  saveData(MESSAGES_FILE, messages);
+}
 
 // Генерация ID
 function generateUserID() {
@@ -63,7 +113,8 @@ app.get('/api/health', (req, res) => {
     status: 'OK', 
     message: 'Сервер работает!',
     timestamp: new Date().toISOString(),
-    usersCount: users.length
+    usersCount: users.length,
+    messagesCount: messages.length
   });
 });
 
@@ -107,6 +158,7 @@ app.post('/api/auth/register', async (req, res) => {
     };
     
     users.push(user);
+    saveUsers(); // Сохраняем в файл
     console.log('✅ Новый пользователь:', username, 'ID:', userid);
     
     // Генерация токена
@@ -159,6 +211,7 @@ app.post('/api/auth/login', async (req, res) => {
     // Обновление статуса
     user.isOnline = true;
     user.lastSeen = new Date();
+    saveUsers(); // Сохраняем изменения
     
     const token = jwt.sign(
       { 
@@ -250,7 +303,18 @@ app.post('/api/friends/request', authenticateToken, (req, res) => {
     };
     
     friendRequests.push(friendRequest);
+    saveFriendRequests(); // Сохраняем в файл
     console.log('✅ Запрос в друзья отправлен:', req.user.username, '→', toUser.username);
+    
+    // 🔥 ИСПРАВЛЕНИЕ: Отправляем уведомление получателю через WebSocket
+    const recipientSocketId = onlineUsers.get(toUser.id);
+    if (recipientSocketId) {
+      const fromUser = users.find(u => u.id === fromUserId);
+      io.to(recipientSocketId).emit('friend_request_received', {
+        from: fromUser.username,
+        userId: fromUser.userid
+      });
+    }
     
     res.json({ 
       success: true, 
@@ -303,12 +367,27 @@ app.post('/api/friends/respond', authenticateToken, (req, res) => {
     if (accept) {
       request.status = 'accepted';
       console.log('✅ Запрос принят:', requestId);
-      res.json({ success: true, message: 'Запрос принят' });
+      
+      // 🔥 ИСПРАВЛЕНИЕ: Уведомляем отправителя о принятии запроса
+      const fromUserSocketId = onlineUsers.get(request.from);
+      if (fromUserSocketId) {
+        const toUser = users.find(u => u.id === req.user.userId);
+        io.to(fromUserSocketId).emit('friend_request_accepted', {
+          username: toUser.username,
+          userId: toUser.userid
+        });
+      }
     } else {
       friendRequests.splice(requestIndex, 1);
       console.log('❌ Запрос отклонен:', requestId);
-      res.json({ success: true, message: 'Запрос отклонен' });
     }
+    
+    saveFriendRequests(); // Сохраняем изменения
+    
+    res.json({ 
+      success: true, 
+      message: accept ? 'Запрос принят' : 'Запрос отклонен' 
+    });
   } catch (error) {
     console.error('❌ Ошибка ответа на запрос:', error);
     res.status(500).json({ error: 'Ошибка сервера' });
@@ -380,6 +459,7 @@ app.put('/api/user/theme', authenticateToken, (req, res) => {
     
     if (userIndex !== -1) {
       users[userIndex].theme = theme;
+      saveUsers(); // Сохраняем изменения
       console.log('🎨 Тема изменена:', req.user.username, '→', theme);
     }
     
@@ -422,6 +502,7 @@ io.on('connection', (socket) => {
   if (userIndex !== -1) {
     users[userIndex].isOnline = true;
     users[userIndex].lastSeen = new Date();
+    saveUsers(); // Сохраняем изменения
   }
   
   onlineUsers.set(socket.userId, socket.id);
@@ -434,9 +515,12 @@ io.on('connection', (socket) => {
   
   userFriends.forEach(req => {
     const friendId = req.from === socket.userId ? req.to : req.from;
-    socket.to(onlineUsers.get(friendId)).emit('friend_online', { 
-      userId: socket.userId 
-    });
+    const friendSocketId = onlineUsers.get(friendId);
+    if (friendSocketId) {
+      socket.to(friendSocketId).emit('friend_online', { 
+        userId: socket.userId 
+      });
+    }
   });
   
   // Отправка сообщения
@@ -457,12 +541,15 @@ io.on('connection', (socket) => {
       };
       
       messages.push(newMessage);
+      saveMessages(); // Сохраняем в файл
       
       const fromUser = users.find(u => u.id === socket.userId);
+      const toUser = users.find(u => u.id === to);
+      
       const messageData = {
         id: newMessage.id,
         from: fromUser.username,
-        to: to,
+        to: toUser.username,
         message: newMessage.message,
         timestamp: newMessage.timestamp
       };
@@ -475,7 +562,7 @@ io.on('connection', (socket) => {
         socket.to(recipientSocketId).emit('new_message', messageData);
       }
       
-      console.log('💬 Сообщение отправлено:', fromUser.username, '→', to);
+      console.log('💬 Сообщение отправлено:', fromUser.username, '→', toUser.username);
       
     } catch (error) {
       console.error('❌ Ошибка отправки сообщения:', error);
@@ -491,6 +578,7 @@ io.on('connection', (socket) => {
     if (userIndex !== -1) {
       users[userIndex].isOnline = false;
       users[userIndex].lastSeen = new Date();
+      saveUsers(); // Сохраняем изменения
     }
     
     onlineUsers.delete(socket.userId);
@@ -498,9 +586,12 @@ io.on('connection', (socket) => {
     // Уведомление друзей об отключении
     userFriends.forEach(req => {
       const friendId = req.from === socket.userId ? req.to : req.from;
-      socket.to(onlineUsers.get(friendId)).emit('friend_offline', { 
-        userId: socket.userId 
-      });
+      const friendSocketId = onlineUsers.get(friendId);
+      if (friendSocketId) {
+        socket.to(friendSocketId).emit('friend_offline', { 
+          userId: socket.userId 
+        });
+      }
     });
   });
 });
@@ -524,7 +615,11 @@ server.listen(PORT, '0.0.0.0', () => {
   console.log(`📍 Порт: ${PORT}`);
   console.log(`🌐 Ссылка: http://localhost:${PORT}`);
   console.log(`⚡ Режим: ${process.env.NODE_ENV || 'development'}`);
+  console.log(`💾 Данные сохраняются в: ${DATA_DIR}`);
+  console.log(`👥 Пользователей: ${users.length}`);
+  console.log(`💬 Сообщений: ${messages.length}`);
 });
 
 // Для Vercel
 module.exports = app;
+[file content end]

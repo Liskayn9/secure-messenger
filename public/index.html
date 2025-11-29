@@ -1,3 +1,5 @@
+[file name]: index.html
+[file content begin]
 <!DOCTYPE html>
 <html lang="ru">
 <head>
@@ -1191,13 +1193,6 @@
                         notificationsPanel.style.display = 'none';
                     }
                 });
-
-                // Уведомления о новых запросах в реальном времени
-                this.setupRealTimeNotifications();
-            }
-
-            setupRealTimeNotifications() {
-                // Эта функция будет вызвана когда подключится WebSocket
             }
 
             async loadUserData() {
@@ -1571,7 +1566,7 @@
                 });
 
                 this.socket.on('new_message', (messageData) => {
-                    if (this.currentChat && messageData.from === this.currentChat.username) {
+                    if (this.currentChat && (messageData.from === this.currentChat.username || messageData.to === this.currentChat.username)) {
                         const container = document.getElementById('messagesContainer');
                         
                         // Убираем empty state если есть
@@ -1579,15 +1574,18 @@
                             container.innerHTML = '';
                         }
                         
+                        const isOutgoing = messageData.from === this.user.username;
                         container.innerHTML += `
-                            <div class="message incoming">
+                            <div class="message ${isOutgoing ? 'outgoing' : 'incoming'}">
                                 <div>${this.escapeHtml(messageData.message)}</div>
                                 <div class="message-time">${this.formatTime(messageData.timestamp)}</div>
                             </div>
                         `;
                         
                         container.scrollTop = container.scrollHeight;
-                        playMessageSound();
+                        if (!isOutgoing) {
+                            playMessageSound();
+                        }
                     }
                 });
 
@@ -1599,10 +1597,16 @@
                     this.updateFriendStatus(data.userId, false);
                 });
 
-                // 🔥 НОВОЕ: Уведомления о новых запросах в реальном времени
+                // 🔥 ИСПРАВЛЕНИЕ: Уведомления о новых запросах в реальном времени
                 this.socket.on('friend_request_received', (data) => {
-                    this.showNotificationToast(`Новый запрос в друзья от ${data.username}`);
+                    this.showNotificationToast(`Новый запрос в друзья от ${data.from || data.username}`);
                     this.loadNotifications(); // Обновляем список уведомлений
+                    playNotificationSound();
+                });
+
+                this.socket.on('friend_request_accepted', (data) => {
+                    this.showNotificationToast(`${data.username} принял(а) ваш запрос в друзья!`);
+                    this.loadFriends(); // Обновляем список друзей
                     playNotificationSound();
                 });
 
@@ -1611,7 +1615,7 @@
                 });
             }
 
-            // 🔥 НОВАЯ ФУНКЦИЯ: Всплывающие уведомления
+            // 🔥 ФУНКЦИЯ: Всплывающие уведомления
             showNotificationToast(message) {
                 const toast = document.createElement('div');
                 toast.className = 'notification-toast';
@@ -1899,3 +1903,4 @@
     </script>
 </body>
 </html>
+[file content end]
