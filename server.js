@@ -7,7 +7,7 @@ const path = require('path');
 const bcrypt = require('bcryptjs');
 const fs = require('fs');
 
-console.log('🚀 Starting Secure Messenger...');
+console.log('🚀 Starting Advanced Secure Messenger...');
 
 const app = express();
 const server = http.createServer(app);
@@ -29,6 +29,7 @@ const DATA_DIR = './data';
 const USERS_FILE = path.join(DATA_DIR, 'users.json');
 const FRIENDS_FILE = path.join(DATA_DIR, 'friends.json');
 const MESSAGES_FILE = path.join(DATA_DIR, 'messages.json');
+const GROUPS_FILE = path.join(DATA_DIR, 'groups.json');
 
 // Создаем директорию для данных если не существует
 if (!fs.existsSync(DATA_DIR)) {
@@ -62,12 +63,14 @@ function saveData(file, data) {
 let users = loadData(USERS_FILE);
 let friends = loadData(FRIENDS_FILE);
 let messages = loadData(MESSAGES_FILE);
+let groups = loadData(GROUPS_FILE);
 let onlineUsers = new Map();
 
 // Функции для сохранения данных
 function saveUsers() { saveData(USERS_FILE, users); }
 function saveFriends() { saveData(FRIENDS_FILE, friends); }
 function saveMessages() { saveData(MESSAGES_FILE, messages); }
+function saveGroups() { saveData(GROUPS_FILE, groups); }
 
 // Генерация ID
 function generateUserID() {
@@ -76,6 +79,10 @@ function generateUserID() {
 
 function generateId() {
   return Date.now().toString() + Math.random().toString(36).substr(2, 5);
+}
+
+function generateGroupId() {
+  return 'G' + Math.floor(100000 + Math.random() * 900000).toString();
 }
 
 // Middleware аутентификации
@@ -104,7 +111,8 @@ app.get('/api/health', (req, res) => {
     message: 'Сервер работает!',
     timestamp: new Date().toISOString(),
     usersCount: users.length,
-    messagesCount: messages.length
+    messagesCount: messages.length,
+    groupsCount: groups.length
   });
 });
 
@@ -146,7 +154,8 @@ app.post('/api/auth/register', async (req, res) => {
       lastSeen: new Date(),
       createdAt: new Date(),
       status: '💭 В сети',
-      avatar: null
+      avatar: null,
+      pinnedChats: []
     };
     
     users.push(user);
@@ -172,7 +181,8 @@ app.post('/api/auth/register', async (req, res) => {
         userid: user.userid,
         username: user.username,
         theme: user.theme,
-        status: user.status
+        status: user.status,
+        pinnedChats: user.pinnedChats
       }
     });
     
@@ -227,7 +237,8 @@ app.post('/api/auth/login', async (req, res) => {
         username: user.username,
         theme: user.theme,
         isOnline: true,
-        status: user.status
+        status: user.status,
+        pinnedChats: user.pinnedChats
       }
     });
     
@@ -253,7 +264,8 @@ app.get('/api/user/profile', authenticateToken, (req, res) => {
         username: user.username,
         theme: user.theme,
         status: user.status,
-        createdAt: user.createdAt
+        createdAt: user.createdAt,
+        pinnedChats: user.pinnedChats
       }
     });
   } catch (error) {
@@ -262,24 +274,23 @@ app.get('/api/user/profile', authenticateToken, (req, res) => {
   }
 });
 
-// 🔥 ИСПРАВЛЕНИЕ: Добавление в друзья сразу без подтверждения
+// 🔥 ДРУЗЬЯ
+
+// Добавление в друзья
 app.post('/api/friends/add', authenticateToken, (req, res) => {
   try {
     const { userid } = req.body;
     const fromUserId = req.user.userId;
     
-    // Поиск пользователя
     const toUser = users.find(u => u.userid === userid);
     if (!toUser) {
       return res.status(404).json({ error: 'Пользователь не найден' });
     }
     
-    // Проверка на себя
     if (toUser.id === fromUserId) {
       return res.status(400).json({ error: 'Нельзя добавить самого себя' });
     }
     
-    // Проверка существующей дружбы
     const existingFriendship = friends.find(f => 
       (f.user1 === fromUserId && f.user2 === toUser.id) ||
       (f.user1 === toUser.id && f.user2 === fromUserId)
@@ -289,7 +300,6 @@ app.post('/api/friends/add', authenticateToken, (req, res) => {
       return res.status(400).json({ error: 'Пользователь уже в друзьях' });
     }
     
-    // Создание дружбы
     const friendship = {
       id: generateId(),
       user1: fromUserId,
@@ -301,7 +311,7 @@ app.post('/api/friends/add', authenticateToken, (req, res) => {
     saveFriends();
     console.log('✅ Добавлен в друзья:', req.user.username, '→', toUser.username);
     
-    // Уведомление получателя через WebSocket
+    // Уведомление получателя
     const recipientSocketId = onlineUsers.get(toUser.id);
     if (recipientSocketId) {
       const fromUser = users.find(u => u.id === fromUserId);
@@ -376,11 +386,13 @@ app.get('/api/friends', authenticateToken, (req, res) => {
             message: lastMessage.message,
             timestamp: lastMessage.timestamp,
             isOwn: lastMessage.from === req.user.userId
-          } : null
+          } : null,
+          isPinned: req.user.pinnedChats?.includes(friend.id) || false
         };
       })
       .sort((a, b) => {
-        // Сначала онлайн, потом по последнему сообщению
+        // Сначала закрепленные, потом онлайн, потом по последнему сообщению
+        if (a.isPinned !== b.isPinned) return b.isPinned - a.isPinned;
         if (a.isOnline !== b.isOnline) return b.isOnline - a.isOnline;
         if (a.lastMessage && b.lastMessage) {
           return new Date(b.lastMessage.timestamp) - new Date(a.lastMessage.timestamp);
@@ -395,7 +407,347 @@ app.get('/api/friends', authenticateToken, (req, res) => {
   }
 });
 
-// Обновление статуса
+// 🔥 ГРУППОВЫЕ ЧАТЫ
+
+// Создание группы
+app.post('/api/groups/create', authenticateToken, (req, res) => {
+  try {
+    const { name, members } = req.body;
+    
+    if (!name || !members || !Array.isArray(members)) {
+      return res.status(400).json({ error: 'Название и участники обязательны' });
+    }
+    
+    const group = {
+      id: generateGroupId(),
+      name,
+      creator: req.user.userId,
+      members: [req.user.userId, ...members],
+      createdAt: new Date(),
+      isGroup: true
+    };
+    
+    groups.push(group);
+    saveGroups();
+    
+    console.log('✅ Создана группа:', name, 'участников:', group.members.length);
+    
+    res.json({ 
+      success: true, 
+      message: 'Группа создана',
+      group: {
+        id: group.id,
+        name: group.name,
+        members: group.members.length
+      }
+    });
+    
+  } catch (error) {
+    console.error('❌ Ошибка создания группы:', error);
+    res.status(500).json({ error: 'Ошибка сервера' });
+  }
+});
+
+// Получение групп пользователя
+app.get('/api/groups', authenticateToken, (req, res) => {
+  try {
+    const userGroups = groups
+      .filter(g => g.members.includes(req.user.userId))
+      .map(group => {
+        const lastMessage = messages
+          .filter(m => m.to === group.id)
+          .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp))[0];
+        
+        const membersInfo = group.members.map(memberId => {
+          const user = users.find(u => u.id === memberId);
+          return user ? {
+            id: user.id,
+            username: user.username,
+            isOnline: user.isOnline
+          } : null;
+        }).filter(Boolean);
+        
+        return {
+          id: group.id,
+          name: group.name,
+          members: membersInfo,
+          memberCount: membersInfo.length,
+          lastMessage: lastMessage ? {
+            message: lastMessage.message,
+            timestamp: lastMessage.timestamp,
+            from: lastMessage.from
+          } : null,
+          isPinned: req.user.pinnedChats?.includes(group.id) || false
+        };
+      })
+      .sort((a, b) => {
+        if (a.isPinned !== b.isPinned) return b.isPinned - a.isPinned;
+        if (a.lastMessage && b.lastMessage) {
+          return new Date(b.lastMessage.timestamp) - new Date(a.lastMessage.timestamp);
+        }
+        return 0;
+      });
+    
+    res.json({ success: true, groups: userGroups });
+  } catch (error) {
+    console.error('❌ Ошибка получения групп:', error);
+    res.status(500).json({ error: 'Ошибка сервера' });
+  }
+});
+
+// 🔥 СООБЩЕНИЯ
+
+// Получение сообщений (личные и групповые)
+app.get('/api/messages/:chatId', authenticateToken, (req, res) => {
+  try {
+    const { chatId } = req.params;
+    const isGroup = chatId.startsWith('G');
+    
+    let chatMessages = [];
+    
+    if (isGroup) {
+      // Групповые сообщения
+      chatMessages = messages
+        .filter(msg => msg.to === chatId)
+        .sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp))
+        .slice(-200);
+    } else {
+      // Личные сообщения
+      chatMessages = messages
+        .filter(msg =>
+          (msg.from === req.user.userId && msg.to === chatId) ||
+          (msg.from === chatId && msg.to === req.user.userId)
+        )
+        .sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp))
+        .slice(-200);
+    }
+    
+    const messagesWithDetails = chatMessages.map(msg => {
+      const fromUser = users.find(u => u.id === msg.from);
+      return {
+        id: msg.id,
+        from: fromUser.username,
+        fromId: msg.from,
+        message: msg.message,
+        timestamp: msg.timestamp,
+        isRead: msg.isRead || false,
+        reactions: msg.reactions || {},
+        isForwarded: msg.isForwarded || false,
+        forwardedFrom: msg.forwardedFrom || null
+      };
+    });
+    
+    res.json({ success: true, messages: messagesWithDetails });
+  } catch (error) {
+    console.error('❌ Ошибка получения сообщений:', error);
+    res.status(500).json({ error: 'Ошибка сервера' });
+  }
+});
+
+// 🔥 РЕАКЦИИ НА СООБЩЕНИЯ
+
+app.post('/api/messages/react', authenticateToken, (req, res) => {
+  try {
+    const { messageId, reaction } = req.body;
+    
+    const message = messages.find(m => m.id === messageId);
+    if (!message) {
+      return res.status(404).json({ error: 'Сообщение не найдено' });
+    }
+    
+    if (!message.reactions) {
+      message.reactions = {};
+    }
+    
+    // Переключаем реакцию
+    if (message.reactions[req.user.userId] === reaction) {
+      delete message.reactions[req.user.userId];
+    } else {
+      message.reactions[req.user.userId] = reaction;
+    }
+    
+    saveMessages();
+    
+    // Отправляем обновление всем участникам чата
+    const chatParticipants = message.to.startsWith('G') 
+      ? groups.find(g => g.id === message.to)?.members || []
+      : [message.from, message.to];
+    
+    chatParticipants.forEach(participantId => {
+      const socketId = onlineUsers.get(participantId);
+      if (socketId) {
+        io.to(socketId).emit('message_reaction', {
+          messageId,
+          reactions: message.reactions
+        });
+      }
+    });
+    
+    res.json({ success: true, reactions: message.reactions });
+  } catch (error) {
+    console.error('❌ Ошибка реакции:', error);
+    res.status(500).json({ error: 'Ошибка сервера' });
+  }
+});
+
+// 🔥 ПЕРЕСЫЛКА СООБЩЕНИЙ
+
+app.post('/api/messages/forward', authenticateToken, (req, res) => {
+  try {
+    const { messageIds, toChatIds } = req.body;
+    
+    if (!messageIds || !toChatIds || !Array.isArray(messageIds) || !Array.isArray(toChatIds)) {
+      return res.status(400).json({ error: 'Неверные данные' });
+    }
+    
+    const originalMessages = messages.filter(m => messageIds.includes(m.id));
+    
+    originalMessages.forEach(originalMsg => {
+      toChatIds.forEach(chatId => {
+        const forwardedMessage = {
+          id: generateId(),
+          from: req.user.userId,
+          to: chatId,
+          message: originalMsg.message,
+          timestamp: new Date(),
+          isRead: false,
+          isForwarded: true,
+          forwardedFrom: originalMsg.from
+        };
+        
+        messages.push(forwardedMessage);
+        
+        // Отправляем уведомление участникам чата
+        const chatParticipants = chatId.startsWith('G')
+          ? groups.find(g => g.id === chatId)?.members || []
+          : [chatId];
+        
+        chatParticipants.forEach(participantId => {
+          const socketId = onlineUsers.get(participantId);
+          if (socketId) {
+            const fromUser = users.find(u => u.id === req.user.userId);
+            const originalFromUser = users.find(u => u.id === originalMsg.from);
+            
+            io.to(socketId).emit('new_message', {
+              id: forwardedMessage.id,
+              from: fromUser.username,
+              to: chatId,
+              message: `📨 Переслано от ${originalFromUser.username}: ${originalMsg.message}`,
+              timestamp: forwardedMessage.timestamp,
+              isForwarded: true
+            });
+          }
+        });
+      });
+    });
+    
+    saveMessages();
+    
+    res.json({ success: true, message: 'Сообщения пересланы' });
+  } catch (error) {
+    console.error('❌ Ошибка пересылки:', error);
+    res.status(500).json({ error: 'Ошибка сервера' });
+  }
+});
+
+// 🔥 ЗАКРЕПЛЕНИЕ ЧАТОВ
+
+app.post('/api/chats/pin', authenticateToken, (req, res) => {
+  try {
+    const { chatId } = req.body;
+    const user = users.find(u => u.id === req.user.userId);
+    
+    if (!user.pinnedChats) {
+      user.pinnedChats = [];
+    }
+    
+    if (user.pinnedChats.includes(chatId)) {
+      // Открепляем
+      user.pinnedChats = user.pinnedChats.filter(id => id !== chatId);
+    } else {
+      // Закрепляем
+      user.pinnedChats.push(chatId);
+    }
+    
+    saveUsers();
+    
+    res.json({ 
+      success: true, 
+      message: user.pinnedChats.includes(chatId) ? 'Чат закреплен' : 'Чат откреплен',
+      pinnedChats: user.pinnedChats 
+    });
+  } catch (error) {
+    console.error('❌ Ошибка закрепления:', error);
+    res.status(500).json({ error: 'Ошибка сервера' });
+  }
+});
+
+// 🔥 ПОИСК ПО СООБЩЕНИЯМ
+
+app.get('/api/messages/search/:query', authenticateToken, (req, res) => {
+  try {
+    const { query } = req.params;
+    const { chatId } = req.query;
+    
+    let searchMessages = messages;
+    
+    if (chatId) {
+      // Поиск в конкретном чате
+      if (chatId.startsWith('G')) {
+        searchMessages = messages.filter(m => m.to === chatId);
+      } else {
+        searchMessages = messages.filter(m =>
+          (m.from === req.user.userId && m.to === chatId) ||
+          (m.from === chatId && m.to === req.user.userId)
+        );
+      }
+    } else {
+      // Поиск по всем чатам пользователя
+      const userFriends = friends
+        .filter(f => f.user1 === req.user.userId || f.user2 === req.user.userId)
+        .map(f => f.user1 === req.user.userId ? f.user2 : f.user1);
+      
+      const userGroups = groups
+        .filter(g => g.members.includes(req.user.userId))
+        .map(g => g.id);
+      
+      searchMessages = messages.filter(m =>
+        (m.from === req.user.userId && (userFriends.includes(m.to) || userGroups.includes(m.to))) ||
+        (userFriends.includes(m.from) && m.to === req.user.userId) ||
+        (userGroups.includes(m.to) && m.to.startsWith('G'))
+      );
+    }
+    
+    const results = searchMessages
+      .filter(m => m.message.toLowerCase().includes(query.toLowerCase()))
+      .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp))
+      .slice(0, 50) // Ограничиваем результаты
+      .map(msg => {
+        const fromUser = users.find(u => u.id === msg.from);
+        const chatName = msg.to.startsWith('G') 
+          ? groups.find(g => g.id === msg.to)?.name 
+          : users.find(u => u.id === (msg.to === req.user.userId ? msg.from : msg.to))?.username;
+        
+        return {
+          id: msg.id,
+          message: msg.message,
+          timestamp: msg.timestamp,
+          from: fromUser.username,
+          chatId: msg.to,
+          chatName: chatName || 'Неизвестный чат',
+          isGroup: msg.to.startsWith('G')
+        };
+      });
+    
+    res.json({ success: true, results, query });
+  } catch (error) {
+    console.error('❌ Ошибка поиска:', error);
+    res.status(500).json({ error: 'Ошибка сервера' });
+  }
+});
+
+// 🔥 ОСТАЛЬНЫЕ ФУНКЦИИ
+
 app.put('/api/user/status', authenticateToken, (req, res) => {
   try {
     const { status } = req.body;
@@ -406,7 +758,7 @@ app.put('/api/user/status', authenticateToken, (req, res) => {
       saveUsers();
       console.log('📝 Статус обновлен:', req.user.username, '→', status);
       
-      // Уведомляем друзей об изменении статуса
+      // Уведомляем друзей
       const userFriends = friends.filter(f => 
         f.user1 === req.user.userId || f.user2 === req.user.userId
       );
@@ -430,38 +782,6 @@ app.put('/api/user/status', authenticateToken, (req, res) => {
   }
 });
 
-// Получение сообщений
-app.get('/api/messages/:friendId', authenticateToken, (req, res) => {
-  try {
-    const friendMessages = messages
-      .filter(msg =>
-        (msg.from === req.user.userId && msg.to === req.params.friendId) ||
-        (msg.from === req.params.friendId && msg.to === req.user.userId)
-      )
-      .sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp))
-      .slice(-200); // Последние 200 сообщений
-    
-    const messagesWithUsernames = friendMessages.map(msg => {
-      const fromUser = users.find(u => u.id === msg.from);
-      const toUser = users.find(u => u.id === msg.to);
-      return {
-        id: msg.id,
-        from: fromUser.username,
-        to: toUser.username,
-        message: msg.message,
-        timestamp: msg.timestamp,
-        isRead: msg.isRead || false
-      };
-    });
-    
-    res.json({ success: true, messages: messagesWithUsernames });
-  } catch (error) {
-    console.error('❌ Ошибка получения сообщений:', error);
-    res.status(500).json({ error: 'Ошибка сервера' });
-  }
-});
-
-// Смена темы
 app.put('/api/user/theme', authenticateToken, (req, res) => {
   try {
     const { theme } = req.body;
@@ -535,9 +855,9 @@ io.on('connection', (socket) => {
   // Отправка сообщения
   socket.on('send_message', (data) => {
     try {
-      const { to, message } = data;
+      const { to, message, isVoice } = data;
       
-      if (!to || !message?.trim()) {
+      if (!to || (!message?.trim() && !isVoice)) {
         return socket.emit('error', { message: 'Сообщение не может быть пустым' });
       }
       
@@ -545,38 +865,58 @@ io.on('connection', (socket) => {
         id: generateId(),
         from: socket.userId,
         to: to,
-        message: message.trim(),
+        message: message?.trim() || '🎤 Голосовое сообщение',
         timestamp: new Date(),
-        isRead: false
+        isRead: false,
+        isVoice: isVoice || false,
+        reactions: {}
       };
       
       messages.push(newMessage);
       saveMessages();
       
       const fromUser = users.find(u => u.id === socket.userId);
-      const toUser = users.find(u => u.id === to);
       
       const messageData = {
         id: newMessage.id,
         from: fromUser.username,
-        to: toUser.username,
+        fromId: socket.userId,
+        to: to,
         message: newMessage.message,
         timestamp: newMessage.timestamp,
-        isRead: false
+        isRead: false,
+        isVoice: newMessage.isVoice,
+        reactions: {}
       };
       
-      // Отправка отправителю и получателю
+      // Отправка отправителю
       socket.emit('new_message', messageData);
       
-      const recipientSocketId = onlineUsers.get(to);
-      if (recipientSocketId) {
-        socket.to(recipientSocketId).emit('new_message', messageData);
-        
-        // Воспроизводим звук у получателя
-        socket.to(recipientSocketId).emit('play_notification_sound');
+      // Отправка получателям
+      if (to.startsWith('G')) {
+        // Групповое сообщение
+        const group = groups.find(g => g.id === to);
+        if (group) {
+          group.members.forEach(memberId => {
+            if (memberId !== socket.userId) {
+              const memberSocketId = onlineUsers.get(memberId);
+              if (memberSocketId) {
+                socket.to(memberSocketId).emit('new_message', messageData);
+                socket.to(memberSocketId).emit('play_notification_sound');
+              }
+            }
+          });
+        }
+      } else {
+        // Личное сообщение
+        const recipientSocketId = onlineUsers.get(to);
+        if (recipientSocketId) {
+          socket.to(recipientSocketId).emit('new_message', messageData);
+          socket.to(recipientSocketId).emit('play_notification_sound');
+        }
       }
       
-      console.log('💬 Сообщение отправлено:', fromUser.username, '→', toUser.username);
+      console.log('💬 Сообщение отправлено:', fromUser.username, '→', to);
       
     } catch (error) {
       console.error('❌ Ошибка отправки сообщения:', error);
@@ -584,40 +924,62 @@ io.on('connection', (socket) => {
     }
   });
   
-  // Отметка сообщений как прочитанных
-  socket.on('mark_messages_read', (data) => {
-    try {
-      const { friendId } = data;
-      messages.forEach(msg => {
-        if (msg.from === friendId && msg.to === socket.userId) {
-          msg.isRead = true;
-        }
-      });
-      saveMessages();
-    } catch (error) {
-      console.error('❌ Ошибка отметки сообщений:', error);
-    }
-  });
-  
-  // Ввод сообщения (typing indicator)
+  // Остальные socket обработчики...
   socket.on('typing_start', (data) => {
-    const { friendId } = data;
-    const friendSocketId = onlineUsers.get(friendId);
-    if (friendSocketId) {
-      socket.to(friendSocketId).emit('friend_typing', {
-        userId: socket.userId,
-        username: socket.username
-      });
+    const { chatId } = data;
+    if (chatId.startsWith('G')) {
+      const group = groups.find(g => g.id === chatId);
+      if (group) {
+        group.members.forEach(memberId => {
+          if (memberId !== socket.userId) {
+            const memberSocketId = onlineUsers.get(memberId);
+            if (memberSocketId) {
+              socket.to(memberSocketId).emit('friend_typing', {
+                userId: socket.userId,
+                username: socket.username,
+                chatId: chatId
+              });
+            }
+          }
+        });
+      }
+    } else {
+      const friendSocketId = onlineUsers.get(chatId);
+      if (friendSocketId) {
+        socket.to(friendSocketId).emit('friend_typing', {
+          userId: socket.userId,
+          username: socket.username,
+          chatId: chatId
+        });
+      }
     }
   });
   
   socket.on('typing_stop', (data) => {
-    const { friendId } = data;
-    const friendSocketId = onlineUsers.get(friendId);
-    if (friendSocketId) {
-      socket.to(friendSocketId).emit('friend_stop_typing', {
-        userId: socket.userId
-      });
+    const { chatId } = data;
+    if (chatId.startsWith('G')) {
+      const group = groups.find(g => g.id === chatId);
+      if (group) {
+        group.members.forEach(memberId => {
+          if (memberId !== socket.userId) {
+            const memberSocketId = onlineUsers.get(memberId);
+            if (memberSocketId) {
+              socket.to(memberSocketId).emit('friend_stop_typing', {
+                userId: socket.userId,
+                chatId: chatId
+              });
+            }
+          }
+        });
+      }
+    } else {
+      const friendSocketId = onlineUsers.get(chatId);
+      if (friendSocketId) {
+        socket.to(friendSocketId).emit('friend_stop_typing', {
+          userId: socket.userId,
+          chatId: chatId
+        });
+      }
     }
   });
   
@@ -647,28 +1009,18 @@ io.on('connection', (socket) => {
   });
 });
 
-// 🔥 ОБРАБОТКА ОШИБОК
-
-process.on('uncaughtException', (error) => {
-  console.error('❌ Необработанная ошибка:', error);
-});
-
-process.on('unhandledRejection', (reason, promise) => {
-  console.error('❌ Необработанный промис:', promise, 'причина:', reason);
-});
-
 // 🔥 ЗАПУСК СЕРВЕРА
 
 const PORT = process.env.PORT || 3000;
 
 server.listen(PORT, '0.0.0.0', () => {
-  console.log('🎉 Сервер успешно запущен!');
+  console.log('🎉 Продвинутый мессенджер успешно запущен!');
   console.log(`📍 Порт: ${PORT}`);
   console.log(`🌐 Ссылка: http://localhost:${PORT}`);
-  console.log(`⚡ Режим: ${process.env.NODE_ENV || 'development'}`);
   console.log(`💾 Данные сохраняются в: ${DATA_DIR}`);
   console.log(`👥 Пользователей: ${users.length}`);
   console.log(`💬 Сообщений: ${messages.length}`);
+  console.log(`👪 Групп: ${groups.length}`);
 });
 
 module.exports = app;
