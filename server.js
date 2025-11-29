@@ -24,10 +24,10 @@ app.use(cors());
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
-// 🔥 ПЕРСИСТЕНТНАЯ БАЗА ДАННЫХ (сохраняется в файлы)
+// 🔥 ПЕРСИСТЕНТНАЯ БАЗА ДАННЫХ
 const DATA_DIR = './data';
 const USERS_FILE = path.join(DATA_DIR, 'users.json');
-const FRIEND_REQUESTS_FILE = path.join(DATA_DIR, 'friend_requests.json');
+const FRIENDS_FILE = path.join(DATA_DIR, 'friends.json');
 const MESSAGES_FILE = path.join(DATA_DIR, 'messages.json');
 
 // Создаем директорию для данных если не существует
@@ -60,22 +60,14 @@ function saveData(file, data) {
 
 // Загружаем данные при старте
 let users = loadData(USERS_FILE);
-let friendRequests = loadData(FRIEND_REQUESTS_FILE);
+let friends = loadData(FRIENDS_FILE);
 let messages = loadData(MESSAGES_FILE);
 let onlineUsers = new Map();
 
 // Функции для сохранения данных
-function saveUsers() {
-  saveData(USERS_FILE, users);
-}
-
-function saveFriendRequests() {
-  saveData(FRIEND_REQUESTS_FILE, friendRequests);
-}
-
-function saveMessages() {
-  saveData(MESSAGES_FILE, messages);
-}
+function saveUsers() { saveData(USERS_FILE, users); }
+function saveFriends() { saveData(FRIENDS_FILE, friends); }
+function saveMessages() { saveData(MESSAGES_FILE, messages); }
 
 // Генерация ID
 function generateUserID() {
@@ -152,11 +144,13 @@ app.post('/api/auth/register', async (req, res) => {
       theme: 'light',
       isOnline: false,
       lastSeen: new Date(),
-      createdAt: new Date()
+      createdAt: new Date(),
+      status: '💭 В сети',
+      avatar: null
     };
     
     users.push(user);
-    saveUsers(); // Сохраняем в файл
+    saveUsers();
     console.log('✅ Новый пользователь:', username, 'ID:', userid);
     
     // Генерация токена
@@ -177,7 +171,8 @@ app.post('/api/auth/register', async (req, res) => {
         id: user.id,
         userid: user.userid,
         username: user.username,
-        theme: user.theme
+        theme: user.theme,
+        status: user.status
       }
     });
     
@@ -209,7 +204,7 @@ app.post('/api/auth/login', async (req, res) => {
     // Обновление статуса
     user.isOnline = true;
     user.lastSeen = new Date();
-    saveUsers(); // Сохраняем изменения
+    saveUsers();
     
     const token = jwt.sign(
       { 
@@ -231,7 +226,8 @@ app.post('/api/auth/login', async (req, res) => {
         userid: user.userid,
         username: user.username,
         theme: user.theme,
-        isOnline: true
+        isOnline: true,
+        status: user.status
       }
     });
     
@@ -255,7 +251,9 @@ app.get('/api/user/profile', authenticateToken, (req, res) => {
         id: user.id,
         userid: user.userid,
         username: user.username,
-        theme: user.theme
+        theme: user.theme,
+        status: user.status,
+        createdAt: user.createdAt
       }
     });
   } catch (error) {
@@ -264,8 +262,8 @@ app.get('/api/user/profile', authenticateToken, (req, res) => {
   }
 });
 
-// Поиск пользователя по ID и отправка запроса в друзья
-app.post('/api/friends/request', authenticateToken, (req, res) => {
+// 🔥 ИСПРАВЛЕНИЕ: Добавление в друзья сразу без подтверждения
+app.post('/api/friends/add', authenticateToken, (req, res) => {
   try {
     const { userid } = req.body;
     const fromUserId = req.user.userId;
@@ -278,116 +276,76 @@ app.post('/api/friends/request', authenticateToken, (req, res) => {
     
     // Проверка на себя
     if (toUser.id === fromUserId) {
-      return res.status(400).json({ error: 'Нельзя отправить запрос самому себе' });
+      return res.status(400).json({ error: 'Нельзя добавить самого себя' });
     }
     
-    // Проверка существующего запроса
-    const existingRequest = friendRequests.find(req => 
-      (req.from === fromUserId && req.to === toUser.id) ||
-      (req.from === toUser.id && req.to === fromUserId)
+    // Проверка существующей дружбы
+    const existingFriendship = friends.find(f => 
+      (f.user1 === fromUserId && f.user2 === toUser.id) ||
+      (f.user1 === toUser.id && f.user2 === fromUserId)
     );
     
-    if (existingRequest) {
-      return res.status(400).json({ error: 'Запрос уже отправлен' });
+    if (existingFriendship) {
+      return res.status(400).json({ error: 'Пользователь уже в друзьях' });
     }
     
-    // Создание запроса
-    const friendRequest = {
+    // Создание дружбы
+    const friendship = {
       id: generateId(),
-      from: fromUserId,
-      to: toUser.id,
-      status: 'pending',
+      user1: fromUserId,
+      user2: toUser.id,
       createdAt: new Date()
     };
     
-    friendRequests.push(friendRequest);
-    saveFriendRequests(); // Сохраняем в файл
-    console.log('✅ Запрос в друзья отправлен:', req.user.username, '→', toUser.username);
+    friends.push(friendship);
+    saveFriends();
+    console.log('✅ Добавлен в друзья:', req.user.username, '→', toUser.username);
     
-    // 🔥 ИСПРАВЛЕНИЕ: Отправляем уведомление получателю через WebSocket
+    // Уведомление получателя через WebSocket
     const recipientSocketId = onlineUsers.get(toUser.id);
     if (recipientSocketId) {
       const fromUser = users.find(u => u.id === fromUserId);
-      io.to(recipientSocketId).emit('friend_request_received', {
-        from: fromUser.username,
+      io.to(recipientSocketId).emit('friend_added', {
+        username: fromUser.username,
         userId: fromUser.userid
       });
     }
     
     res.json({ 
       success: true, 
-      message: 'Запрос в друзья отправлен' 
-    });
-    
-  } catch (error) {
-    console.error('❌ Ошибка запроса в друзья:', error);
-    res.status(500).json({ error: 'Ошибка сервера' });
-  }
-});
-
-// Получение входящих запросов в друзья
-app.get('/api/friends/requests', authenticateToken, (req, res) => {
-  try {
-    const requests = friendRequests
-      .filter(req => req.to === req.user.userId && req.status === 'pending')
-      .map(req => {
-        const fromUser = users.find(u => u.id === req.from);
-        return {
-          id: req.id,
-          from: {
-            id: fromUser.id,
-            username: fromUser.username,
-            userid: fromUser.userid
-          },
-          createdAt: req.createdAt
-        };
-      });
-    
-    res.json({ success: true, requests });
-  } catch (error) {
-    console.error('❌ Ошибка получения запросов:', error);
-    res.status(500).json({ error: 'Ошибка сервера' });
-  }
-});
-
-// Ответ на запрос в друзья
-app.post('/api/friends/respond', authenticateToken, (req, res) => {
-  try {
-    const { requestId, accept } = req.body;
-    
-    const requestIndex = friendRequests.findIndex(req => req.id === requestId);
-    if (requestIndex === -1) {
-      return res.status(404).json({ error: 'Запрос не найден' });
-    }
-    
-    const request = friendRequests[requestIndex];
-    
-    if (accept) {
-      request.status = 'accepted';
-      console.log('✅ Запрос принят:', requestId);
-      
-      // 🔥 ИСПРАВЛЕНИЕ: Уведомляем отправителя о принятии запроса
-      const fromUserSocketId = onlineUsers.get(request.from);
-      if (fromUserSocketId) {
-        const toUser = users.find(u => u.id === req.user.userId);
-        io.to(fromUserSocketId).emit('friend_request_accepted', {
-          username: toUser.username,
-          userId: toUser.userid
-        });
+      message: 'Пользователь добавлен в друзья',
+      friend: {
+        id: toUser.id,
+        userid: toUser.userid,
+        username: toUser.username,
+        isOnline: toUser.isOnline
       }
-    } else {
-      friendRequests.splice(requestIndex, 1);
-      console.log('❌ Запрос отклонен:', requestId);
+    });
+    
+  } catch (error) {
+    console.error('❌ Ошибка добавления в друзья:', error);
+    res.status(500).json({ error: 'Ошибка сервера' });
+  }
+});
+
+// Удаление из друзей
+app.delete('/api/friends/remove/:friendId', authenticateToken, (req, res) => {
+  try {
+    const friendIndex = friends.findIndex(f => 
+      (f.user1 === req.user.userId && f.user2 === req.params.friendId) ||
+      (f.user1 === req.params.friendId && f.user2 === req.user.userId)
+    );
+    
+    if (friendIndex === -1) {
+      return res.status(404).json({ error: 'Друг не найден' });
     }
     
-    saveFriendRequests(); // Сохраняем изменения
+    friends.splice(friendIndex, 1);
+    saveFriends();
     
-    res.json({ 
-      success: true, 
-      message: accept ? 'Запрос принят' : 'Запрос отклонен' 
-    });
+    res.json({ success: true, message: 'Пользователь удален из друзей' });
   } catch (error) {
-    console.error('❌ Ошибка ответа на запрос:', error);
+    console.error('❌ Ошибка удаления друга:', error);
     res.status(500).json({ error: 'Ошибка сервера' });
   }
 });
@@ -395,26 +353,79 @@ app.post('/api/friends/respond', authenticateToken, (req, res) => {
 // Получение списка друзей
 app.get('/api/friends', authenticateToken, (req, res) => {
   try {
-    const friends = friendRequests
-      .filter(req => 
-        (req.from === req.user.userId || req.to === req.user.userId) && 
-        req.status === 'accepted'
-      )
-      .map(req => {
-        const friendId = req.from === req.user.userId ? req.to : req.from;
+    const userFriends = friends
+      .filter(f => f.user1 === req.user.userId || f.user2 === req.user.userId)
+      .map(f => {
+        const friendId = f.user1 === req.user.userId ? f.user2 : f.user1;
         const friend = users.find(u => u.id === friendId);
+        const lastMessage = messages
+          .filter(m => 
+            (m.from === req.user.userId && m.to === friendId) ||
+            (m.from === friendId && m.to === req.user.userId)
+          )
+          .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp))[0];
+        
         return {
           id: friend.id,
           userid: friend.userid,
           username: friend.username,
           isOnline: friend.isOnline,
-          lastSeen: friend.lastSeen
+          lastSeen: friend.lastSeen,
+          status: friend.status,
+          lastMessage: lastMessage ? {
+            message: lastMessage.message,
+            timestamp: lastMessage.timestamp,
+            isOwn: lastMessage.from === req.user.userId
+          } : null
         };
+      })
+      .sort((a, b) => {
+        // Сначала онлайн, потом по последнему сообщению
+        if (a.isOnline !== b.isOnline) return b.isOnline - a.isOnline;
+        if (a.lastMessage && b.lastMessage) {
+          return new Date(b.lastMessage.timestamp) - new Date(a.lastMessage.timestamp);
+        }
+        return 0;
       });
     
-    res.json({ success: true, friends });
+    res.json({ success: true, friends: userFriends });
   } catch (error) {
     console.error('❌ Ошибка получения друзей:', error);
+    res.status(500).json({ error: 'Ошибка сервера' });
+  }
+});
+
+// Обновление статуса
+app.put('/api/user/status', authenticateToken, (req, res) => {
+  try {
+    const { status } = req.body;
+    const userIndex = users.findIndex(u => u.id === req.user.userId);
+    
+    if (userIndex !== -1) {
+      users[userIndex].status = status || '💭 В сети';
+      saveUsers();
+      console.log('📝 Статус обновлен:', req.user.username, '→', status);
+      
+      // Уведомляем друзей об изменении статуса
+      const userFriends = friends.filter(f => 
+        f.user1 === req.user.userId || f.user2 === req.user.userId
+      );
+      
+      userFriends.forEach(f => {
+        const friendId = f.user1 === req.user.userId ? f.user2 : f.user1;
+        const friendSocketId = onlineUsers.get(friendId);
+        if (friendSocketId) {
+          io.to(friendSocketId).emit('friend_status_changed', {
+            userId: req.user.userId,
+            status: status
+          });
+        }
+      });
+    }
+    
+    res.json({ success: true, message: 'Статус обновлен' });
+  } catch (error) {
+    console.error('❌ Ошибка обновления статуса:', error);
     res.status(500).json({ error: 'Ошибка сервера' });
   }
 });
@@ -428,7 +439,7 @@ app.get('/api/messages/:friendId', authenticateToken, (req, res) => {
         (msg.from === req.params.friendId && msg.to === req.user.userId)
       )
       .sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp))
-      .slice(-100); // Последние 100 сообщений
+      .slice(-200); // Последние 200 сообщений
     
     const messagesWithUsernames = friendMessages.map(msg => {
       const fromUser = users.find(u => u.id === msg.from);
@@ -438,7 +449,8 @@ app.get('/api/messages/:friendId', authenticateToken, (req, res) => {
         from: fromUser.username,
         to: toUser.username,
         message: msg.message,
-        timestamp: msg.timestamp
+        timestamp: msg.timestamp,
+        isRead: msg.isRead || false
       };
     });
     
@@ -457,7 +469,7 @@ app.put('/api/user/theme', authenticateToken, (req, res) => {
     
     if (userIndex !== -1) {
       users[userIndex].theme = theme;
-      saveUsers(); // Сохраняем изменения
+      saveUsers();
       console.log('🎨 Тема изменена:', req.user.username, '→', theme);
     }
     
@@ -500,19 +512,18 @@ io.on('connection', (socket) => {
   if (userIndex !== -1) {
     users[userIndex].isOnline = true;
     users[userIndex].lastSeen = new Date();
-    saveUsers(); // Сохраняем изменения
+    saveUsers();
   }
   
   onlineUsers.set(socket.userId, socket.id);
   
   // Уведомление друзей о подключении
-  const userFriends = friendRequests.filter(req => 
-    (req.from === socket.userId || req.to === socket.userId) && 
-    req.status === 'accepted'
+  const userFriends = friends.filter(f => 
+    f.user1 === socket.userId || f.user2 === socket.userId
   );
   
-  userFriends.forEach(req => {
-    const friendId = req.from === socket.userId ? req.to : req.from;
+  userFriends.forEach(f => {
+    const friendId = f.user1 === socket.userId ? f.user2 : f.user1;
     const friendSocketId = onlineUsers.get(friendId);
     if (friendSocketId) {
       socket.to(friendSocketId).emit('friend_online', { 
@@ -535,11 +546,12 @@ io.on('connection', (socket) => {
         from: socket.userId,
         to: to,
         message: message.trim(),
-        timestamp: new Date()
+        timestamp: new Date(),
+        isRead: false
       };
       
       messages.push(newMessage);
-      saveMessages(); // Сохраняем в файл
+      saveMessages();
       
       const fromUser = users.find(u => u.id === socket.userId);
       const toUser = users.find(u => u.id === to);
@@ -549,7 +561,8 @@ io.on('connection', (socket) => {
         from: fromUser.username,
         to: toUser.username,
         message: newMessage.message,
-        timestamp: newMessage.timestamp
+        timestamp: newMessage.timestamp,
+        isRead: false
       };
       
       // Отправка отправителю и получателю
@@ -558,6 +571,9 @@ io.on('connection', (socket) => {
       const recipientSocketId = onlineUsers.get(to);
       if (recipientSocketId) {
         socket.to(recipientSocketId).emit('new_message', messageData);
+        
+        // Воспроизводим звук у получателя
+        socket.to(recipientSocketId).emit('play_notification_sound');
       }
       
       console.log('💬 Сообщение отправлено:', fromUser.username, '→', toUser.username);
@@ -565,6 +581,43 @@ io.on('connection', (socket) => {
     } catch (error) {
       console.error('❌ Ошибка отправки сообщения:', error);
       socket.emit('error', { message: 'Ошибка отправки сообщения' });
+    }
+  });
+  
+  // Отметка сообщений как прочитанных
+  socket.on('mark_messages_read', (data) => {
+    try {
+      const { friendId } = data;
+      messages.forEach(msg => {
+        if (msg.from === friendId && msg.to === socket.userId) {
+          msg.isRead = true;
+        }
+      });
+      saveMessages();
+    } catch (error) {
+      console.error('❌ Ошибка отметки сообщений:', error);
+    }
+  });
+  
+  // Ввод сообщения (typing indicator)
+  socket.on('typing_start', (data) => {
+    const { friendId } = data;
+    const friendSocketId = onlineUsers.get(friendId);
+    if (friendSocketId) {
+      socket.to(friendSocketId).emit('friend_typing', {
+        userId: socket.userId,
+        username: socket.username
+      });
+    }
+  });
+  
+  socket.on('typing_stop', (data) => {
+    const { friendId } = data;
+    const friendSocketId = onlineUsers.get(friendId);
+    if (friendSocketId) {
+      socket.to(friendSocketId).emit('friend_stop_typing', {
+        userId: socket.userId
+      });
     }
   });
   
@@ -576,14 +629,14 @@ io.on('connection', (socket) => {
     if (userIndex !== -1) {
       users[userIndex].isOnline = false;
       users[userIndex].lastSeen = new Date();
-      saveUsers(); // Сохраняем изменения
+      saveUsers();
     }
     
     onlineUsers.delete(socket.userId);
     
     // Уведомление друзей об отключении
-    userFriends.forEach(req => {
-      const friendId = req.from === socket.userId ? req.to : req.from;
+    userFriends.forEach(f => {
+      const friendId = f.user1 === socket.userId ? f.user2 : f.user1;
       const friendSocketId = onlineUsers.get(friendId);
       if (friendSocketId) {
         socket.to(friendSocketId).emit('friend_offline', { 
@@ -618,5 +671,4 @@ server.listen(PORT, '0.0.0.0', () => {
   console.log(`💬 Сообщений: ${messages.length}`);
 });
 
-// Для Vercel
 module.exports = app;
