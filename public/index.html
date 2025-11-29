@@ -660,19 +660,20 @@
             background: #4b5563;
         }
 
-        /* 🔔 УВЕДОМЛЕНИЯ */
+        /* 🔔 УВЕДОМЛЕНИЯ - ИСПРАВЛЕННЫЕ */
         .notifications-panel {
             position: fixed;
             top: 80px;
-            right: 24px;
+            right: 20px;
             width: 380px;
+            max-width: 90vw;
             background: var(--bg-light);
             border: 1px solid var(--border-light);
             border-radius: var(--radius);
             box-shadow: var(--shadow);
             z-index: 1000;
             display: none;
-            max-height: 400px;
+            max-height: 70vh;
             overflow-y: auto;
         }
 
@@ -818,31 +819,100 @@
             animation: pulse 2s infinite;
         }
 
-        /* 📱 АДАПТИВНОСТЬ */
+        /* 📱 АДАПТИВНОСТЬ ДЛЯ ТЕЛЕФОНА - ИСПРАВЛЕННАЯ */
         @media (max-width: 768px) {
-            .sidebar {
-                width: 100%;
-                position: absolute;
-                z-index: 100;
-                height: 100%;
-                transform: translateX(-100%);
+            .notifications-panel {
+                position: fixed;
+                top: 50%;
+                left: 50%;
+                transform: translate(-50%, -50%);
+                width: 90vw;
+                max-width: 400px;
+                max-height: 70vh;
+                z-index: 10000;
             }
             
-            .sidebar.active {
-                transform: translateX(0);
+            .notification-item {
+                padding: 15px;
+                flex-direction: column;
+                gap: 12px;
+                align-items: stretch;
+            }
+            
+            .notification-actions {
+                justify-content: center;
+                width: 100%;
+            }
+            
+            .auth-container {
+                margin: 10px;
+                padding: 30px 20px;
+            }
+            
+            .header {
+                padding: 12px 15px;
+            }
+            
+            .header-title {
+                font-size: 20px;
+            }
+            
+            .header-controls {
+                gap: 10px;
+            }
+            
+            .user-id-badge {
+                font-size: 12px;
+                padding: 6px 10px;
+            }
+            
+            .theme-slider {
+                gap: 8px;
+            }
+            
+            .main-content {
+                flex-direction: column;
+                height: calc(100vh - 60px);
+            }
+            
+            .sidebar {
+                width: 100%;
+                height: 40%;
             }
             
             .chat-area {
-                width: 100%;
+                height: 60%;
             }
             
             .message {
                 max-width: 85%;
             }
             
-            .notifications-panel {
-                width: 90vw;
-                right: 5vw;
+            .message-input-container {
+                padding: 15px;
+            }
+            
+            .search-results {
+                left: 10px;
+                right: 10px;
+            }
+        }
+
+        @media (max-width: 480px) {
+            .header-controls {
+                gap: 6px;
+            }
+            
+            .user-id-badge {
+                display: none;
+            }
+            
+            .theme-slider span {
+                display: none;
+            }
+            
+            .theme-slider {
+                gap: 4px;
             }
         }
 
@@ -874,6 +944,29 @@
             font-size: 48px;
             margin-bottom: 16px;
             opacity: 0.5;
+        }
+
+        /* 🔥 УВЕДОМЛЕНИЯ В РЕАЛЬНОМ ВРЕМЕНИ */
+        .notification-toast {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            background: var(--primary);
+            color: white;
+            padding: 15px 20px;
+            border-radius: 8px;
+            box-shadow: var(--shadow);
+            z-index: 10000;
+            animation: slideUp 0.3s ease;
+            max-width: 300px;
+        }
+
+        @media (max-width: 768px) {
+            .notification-toast {
+                right: 10px;
+                left: 10px;
+                max-width: none;
+            }
         }
     </style>
 </head>
@@ -1094,10 +1187,17 @@
                     const notificationsPanel = document.getElementById('notificationsPanel');
                     const notificationsBtn = document.getElementById('notificationsBtn');
                     
-                    if (!notificationsPanel.contains(e.target) && !notificationsBtn.contains(e.target)) {
+                    if (notificationsPanel && !notificationsPanel.contains(e.target) && !notificationsBtn.contains(e.target)) {
                         notificationsPanel.style.display = 'none';
                     }
                 });
+
+                // Уведомления о новых запросах в реальном времени
+                this.setupRealTimeNotifications();
+            }
+
+            setupRealTimeNotifications() {
+                // Эта функция будет вызвана когда подключится WebSocket
             }
 
             async loadUserData() {
@@ -1280,6 +1380,9 @@
                         document.getElementById('searchResults').style.display = 'none';
                         await this.loadNotifications();
                         playNotificationSound();
+                        
+                        // Показываем всплывающее уведомление
+                        this.showNotificationToast('Запрос в друзья отправлен!');
                     } else {
                         this.showError(data.error);
                     }
@@ -1496,8 +1599,39 @@
                     this.updateFriendStatus(data.userId, false);
                 });
 
+                // 🔥 НОВОЕ: Уведомления о новых запросах в реальном времени
+                this.socket.on('friend_request_received', (data) => {
+                    this.showNotificationToast(`Новый запрос в друзья от ${data.username}`);
+                    this.loadNotifications(); // Обновляем список уведомлений
+                    playNotificationSound();
+                });
+
                 this.socket.on('error', (data) => {
                     this.showError(data.message);
+                });
+            }
+
+            // 🔥 НОВАЯ ФУНКЦИЯ: Всплывающие уведомления
+            showNotificationToast(message) {
+                const toast = document.createElement('div');
+                toast.className = 'notification-toast';
+                toast.innerHTML = `
+                    <div style="display: flex; align-items: center; gap: 10px;">
+                        <i class="fas fa-bell" style="font-size: 18px;"></i>
+                        <div>${message}</div>
+                    </div>
+                `;
+                
+                document.body.appendChild(toast);
+                
+                // Автоматическое скрытие через 5 секунд
+                setTimeout(() => {
+                    toast.remove();
+                }, 5000);
+                
+                // Закрытие по клику
+                toast.addEventListener('click', () => {
+                    toast.remove();
                 });
             }
 
@@ -1641,6 +1775,11 @@
                 setTimeout(() => {
                     notification.remove();
                 }, 4000);
+                
+                // Закрытие по клику
+                notification.addEventListener('click', () => {
+                    notification.remove();
+                });
             }
         }
 
