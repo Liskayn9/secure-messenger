@@ -1,5 +1,3 @@
-[file name]: server.js
-[file content begin]
 const express = require('express');
 const http = require('http');
 const socketIo = require('socket.io');
@@ -622,4 +620,3 @@ server.listen(PORT, '0.0.0.0', () => {
 
 // Для Vercel
 module.exports = app;
-[file content end]
